@@ -5,7 +5,7 @@
       url = "github:numtide/flake-utils";
     };
     horizon-platform = {
-      url = "git+https://gitlab.homotopic.tech/horizon/horizon-platform";
+      url = "github:blackheaven/horizon-platform-forked";
     };
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
   };
@@ -30,7 +30,7 @@
                 cd cbits; ${pkgs.souffle}/bin/souffle -g categorise.{cpp,dl}
                 cd ..
               '';
-            }) ;
+            });
           };
       };
     in
