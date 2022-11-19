@@ -1,8 +1,9 @@
 packages: ./
 
-with-compiler: ghc-9.2
+with-compiler: ghc-9.2.4
 
-jobs: 8
+jobs: 20
+profiling: True
 
 tests: True
 
