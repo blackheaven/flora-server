@@ -2,14 +2,14 @@
 
 module Flora.Import.Package.Bulk (importAllFilesInDirectory, importAllFilesInRelativeDirectory) where
 
-import Control.Monad (when, (>=>))
+-- import Control.Monad (when)
 import Data.List (isSuffixOf)
 import Effectful
 import Effectful.Log qualified as Log
 import Effectful.PostgreSQL.Transact.Effect (DB, getPool, runDB)
 import Effectful.Time
 import Log (Logger, defaultLogLevel)
-import Streamly.Data.Fold qualified as SFold
+-- import Streamly.Data.Fold qualified as SFold
 import Streamly.Prelude qualified as S
 import System.Directory qualified as System
 import System.FilePath
@@ -31,29 +31,31 @@ importAllFilesInDirectory appLogger user dir = do
   pool <- getPool
   liftIO $ System.createDirectoryIfMissing True dir
   liftIO . putStrLn $ "🔎  Searching cabal files in " <> dir
-  let displayCount =
-        flip SFold.foldlM' (return 0) $
-          \previousCount _ ->
-            let currentCount = previousCount + 1
-             in do
-                  when (currentCount `mod` 400 == 0) $
-                    displayStats currentCount
-                  return currentCount
-  processedPackageCount <- liftIO $ S.fold displayCount $ S.fromParallel $ S.mapM (processFile pool) $ findAllCabalFilesInDirectory dir
-  displayStats processedPackageCount
+  -- let _displayCount =
+  --       flip SFold.foldlM' (return 0) $
+  --         \previousCount _ ->
+  --           let currentCount = previousCount + 1
+  --            in do
+  --                 when (currentCount `mod` 400 == 0) $
+  --                   displayStats currentCount
+  --                 return currentCount
+  --     displayStats :: MonadIO m => Int -> m ()
+  --     displayStats currentCount =
+  --       liftIO . putStrLn $ "✅ Processed " <> show currentCount <> " new cabal files"
+  let fetchImportOutput =
+        runEff
+          . runDB pool
+          . runCurrentTimeIO
+          . Log.runLog "flora-jobs" appLogger defaultLogLevel
+          . loadAndExtractCabalFile user
+      processFile f = do
+        imported <- fetchImportOutput f
+        return $ persistImportOutput pool imported
+  liftIO (S.drain $ S.fromParallel $ S.maxBuffer 250 $ S.concatMapM processFile $ findAllCabalFilesInDirectory dir)
+  -- displayStats processedPackageCount
   Update.refreshLatestVersions >> Update.refreshDependents
-  where
-    processFile pool =
-      runEff
-        . runDB pool
-        . runCurrentTimeIO
-        . Log.runLog "flora-jobs" appLogger defaultLogLevel
-        . (loadAndExtractCabalFile user >=> persistImportOutput)
-    displayStats :: MonadIO m => Int -> m ()
-    displayStats currentCount =
-      liftIO . putStrLn $ "✅ Processed " <> show currentCount <> " new cabal files"
 
-findAllCabalFilesInDirectory :: FilePath -> S.ParallelT IO FilePath
+findAllCabalFilesInDirectory :: FilePath -> S.Parallel FilePath
 findAllCabalFilesInDirectory workdir = S.concatMapM traversePath $ S.fromList [workdir]
   where
     traversePath p = do

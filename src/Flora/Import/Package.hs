@@ -187,7 +187,11 @@ importFile
   -> FilePath
   -- ^ The absolute path to the Cabal file
   -> Eff es ()
-importFile userId path = loadFile path >>= extractPackageDataFromCabal userId >>= persistImportOutput
+importFile userId path = do
+  loadedFile <- loadFile path
+  packageData <- extractPackageDataFromCabal userId loadedFile
+  pool <- getPool
+  liftIO $ S.drain $ S.fromParallel $ persistImportOutput pool packageData
 
 importRelFile :: (DB :> es, IOE :> es, Log :> es, Time :> es) => UserId -> FilePath -> Eff es ()
 importRelFile user dir = do
@@ -196,7 +200,7 @@ importRelFile user dir = do
 
 -- | Loads and parses a Cabal file
 loadFile
-  :: (DB :> es, IOE :> es, Log :> es, Time :> es)
+  :: (IOE :> es, Log :> es)
   => FilePath
   -- ^ The absolute path to the Cabal file
   -> Eff es GenericPackageDescription
@@ -210,7 +214,7 @@ loadFile path = do
   parseString parseGenericPackageDescription path content
 
 parseString
-  :: (HasCallStack, Log :> es, Time :> es)
+  :: (HasCallStack, Log :> es)
   => (BS.ByteString -> ParseResult a)
   -- ^ File contents to final value parser
   -> String
@@ -225,44 +229,43 @@ parseString parser name bs = do
       Log.logAttention_ (display $ show err)
       throw $ CabalFileCouldNotBeParsed name
 
-loadAndExtractCabalFile :: (DB :> es, IOE :> es, Log :> es, Time :> es) => UserId -> FilePath -> Eff es ImportOutput
+loadAndExtractCabalFile :: (IOE :> es, Log :> es) => UserId -> FilePath -> Eff es ImportOutput
 loadAndExtractCabalFile userId filePath = loadFile filePath >>= extractPackageDataFromCabal userId
 
 {-| Persists an 'ImportOutput' to the database. An 'ImportOutput' can be obtained
  by extracting relevant information from a Cabal file using 'extractPackageDataFromCabal'
 -}
-persistImportOutput :: (DB :> es, IOE :> es) => ImportOutput -> Eff es ()
-persistImportOutput (ImportOutput package categories release components) = do
-  pool <- getPool
+persistImportOutput :: Pool Connection -> ImportOutput -> S.Parallel ()
+persistImportOutput pool (ImportOutput package categories release components) = do
   liftIO . T.putStrLn $ "📦  Persisting package: " <> packageName <> ", 🗓  Release v" <> display (release.version)
   persistPackage
-  Update.upsertRelease release
-  parallelRun pool (persistComponent pool) components
+  runInDB $ Update.upsertRelease release
+  S.concatMap persistComponent $ S.fromList components
   liftIO $ putStr "\n"
   where
-    parallelRun :: (MonadIO m, Foldable t) => Pool Connection -> (a -> Eff [DB, IOE] b) -> t a -> m ()
-    parallelRun pool f = liftIO . S.drain . S.fromParallel . S.mapM (runEff . runDB pool . f) . S.fromFoldable
+    runInDB :: (MonadIO m) => Eff [DB, IOE] a -> m a
+    runInDB = liftIO . runEff . runDB pool
     packageName = display (package.namespace) <> "/" <> display (package.name)
     persistPackage = do
       let packageId = package.packageId
-      Update.upsertPackage package
-      forM_ categories (\case Tuning.NormalisedPackageCategory cat -> Update.addToCategoryByName packageId cat)
+      runInDB $ Update.upsertPackage package
+      S.concatMap (\case Tuning.NormalisedPackageCategory cat -> runInDB $ Update.addToCategoryByName packageId cat) $ S.fromList categories
 
-    persistComponent pool (packageComponent, deps) = do
+    persistComponent (packageComponent, deps) = do
       liftIO . T.putStrLn $
         "🧩  Persisting component: " <> display (packageComponent.canonicalForm) <> " with " <> display (length deps) <> " dependencies."
-      Update.upsertPackageComponent packageComponent
-      parallelRun pool persistImportDependency deps
+      runInDB $ Update.upsertPackageComponent packageComponent
+      S.concatMap persistImportDependency $ S.fromList deps
 
     persistImportDependency dep = do
-      Update.upsertPackage (dep.package)
-      Update.upsertRequirement (dep.requirement)
+      runInDB $ Update.upsertPackage (dep.package)
+      runInDB $ Update.upsertRequirement (dep.requirement)
 
 {-| Transforms a 'GenericPackageDescription' from Cabal into an 'ImportOutput'
  that can later be inserted into the database. This function produces stable, deterministic ids,
  so it should be possible to extract and insert a single package many times in a row.
 -}
-extractPackageDataFromCabal :: (DB :> es, IOE :> es) => UserId -> GenericPackageDescription -> Eff es ImportOutput
+extractPackageDataFromCabal :: (MonadIO m) => UserId -> GenericPackageDescription -> m ImportOutput
 extractPackageDataFromCabal userId genericDesc = do
   let packageDesc = genericDesc.packageDescription
   let flags = Vector.fromList genericDesc.genPackageFlags
