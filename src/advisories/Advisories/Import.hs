@@ -71,8 +71,7 @@ syncAdvisories root = do
     Right status -> pure status
 
 importAdvisory
-  :: ( Error (NonEmpty AdvisoryImportError) :> es
-     , IOE :> es
+  :: ( IOE :> es
      , Log :> es
      , Reader FloraEnv :> es
      )
@@ -129,7 +128,6 @@ processAffectedPackage
   -> FloraM es ()
 processAffectedPackage advisoryId affected = do
   FloraEnv{pool} <- Reader.ask
-  affectedPackageId <- AffectedPackageId <$> liftIO UUID.nextRandom
   let (namespace, packageName) =
         case affected.affectedComponentIdentifier of
           Repository _ (RepositoryName repositoryName) affectedPackageName ->
@@ -144,6 +142,7 @@ processAffectedPackage advisoryId affected = do
           , "package" .= display packageName
           ]
     Just package -> do
+      affectedPackageId <- AffectedPackageId <$> liftIO UUID.nextRandom
       let declarations =
             affected.affectedDeclarations
               & fmap (uncurry AffectedDeclaration)
