@@ -39,6 +39,7 @@ allow-newer: chronos:hashable
            , http-client-tls:crypton
            , tls:crypton
            , pandoc:crypton
+           , osv:cvss
 
 constraints:
   , any.Cabal ==3.16.1.0
